@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>Pulse</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,#app{height:100%;background:#060A0F}
+body{font-family:'DM Sans',-apple-system,sans-serif;-webkit-font-smoothing:antialiased;color:#E8EEF4}
+::-webkit-scrollbar{display:none}
+button,input{font-family:inherit;border:none;outline:none;cursor:pointer}
+img{display:block}
+a{text-decoration:none}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:.3}50%{opacity:1}}
+@keyframes shimmer{from{background-position:-600px 0}to{background-position:600px 0}}
+.fu{animation:fadeUp .35s both}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const GNEWS_KEY = "df0f9471811d95d066ae249ae31c9d53";
+const CATEGORIES = ["Top Stories","Technology","Science","Business","Sports","Health","Entertainment","World"];
+const CAT_MAP = {"Top Stories":"general",Technology:"technology",Science:"science",Business:"business",Sports:"sports",Health:"health",Entertainment:"entertainment",World:"world"};
+const STOP = new Set("the a an in on at to for of and or is are was were says said new will has have its with as by that this from but not after over about into their first been more than also when they which some time year just make could would should very then there what during while each other those these".split(" "));
+
+const store = {
+  get:(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch{return d}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+};
+
+let state = {
+  articles:[], bookmarks:store.get("bk",[]), prefs:store.get("prefs",{}),
+  antKey:store.get("ak",""), loading:false, error:"",
+  category:"Top Stories", query:"", view:"feed",
+  detail:null, aiSummary:"", aiLoading:false, aiKeyPrompt:false,
+};
+
+function setState(patch){
+  Object.assign(state,typeof patch==="function"?patch(state):patch);
+  render();
+}
+
+function relTime(iso){
+  try{
+    const d=Date.now()-new Date(iso).getTime();
+    if(d<3600000)return Math.floor(d/60000)+"m ago";
+    if(d<86400000)return Math.floor(d/3600000)+"h ago";
+    return Math.floor(d/86400000)+"d ago";
+  }catch{return""}
+}
+
+function extractKw(a){
+  return (a.title+" "+(a.description||"")).toLowerCase()
+    .split(/[\s,.'"\-!?;:()\[\]\/]+/)
+    .filter(w=>w.length>3&&!STOP.has(w)&&/^[a-z]+$/.test(w)).slice(0,8);
+}
+
+function scoreA(a,prefs){
+  const t=(a.title+" "+(a.description||"")).toLowerCase();
+  return Object.entries(prefs).reduce((s,[k,v])=>t.includes(k)?s+v:s,0);
+}
+
+async function fetchNews(category,query){
+  setState({loading:true,error:""});
+  try{
+    let url;
+    if(query&&query.trim()){
+      url=`https://gnews.io/api/v4/search?q=${encodeURIComponent(query.trim())}&lang=en&max=30&apikey=${GNEWS_KEY}`;
+    } else {
+      const cat=CAT_MAP[category]||"general";
+      url=`https://gnews.io/api/v4/top-headlines?lang=en&country=us&max=40&category=${cat}&apikey=${GNEWS_KEY}`;
+    }
+    const res=await fetch(url);
+    const data=await res.json();
+    if(!data.articles)throw new Error(data.errors?.[0]||"No articles returned");
+    const prefs=state.prefs;
+    const articles=data.articles
+      .filter(a=>a.title&&a.url)
+      .map(a=>({
+        id:a.url,title:a.title,description:a.description||"",
+        url:a.url,imageUrl:a.image||"",
+        source:a.source?.name||"News",publishedAt:a.publishedAt||"",
+        rel:scoreA(a,prefs)
+      }))
+      .sort((a,b)=>b.rel-a.rel);
+    setState({articles,loading:false,error:""});
+  }catch(e){
+    setState({loading:false,error:e.message||"Failed to load news."});
+  }
+}
+
+async function runAI(key,article){
+  setState({aiLoading:true,aiSummary:""});
+  try{
+    const res=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","anthropic-dangerous-direct-browser-access":"true","x-api-key":key},
+      body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",max_tokens:400,
+        system:"Summarize this real news article in 3 bullet points (each starting with •), then one line 'Why it matters:'. Factual, concise, no speculation.",
+        messages:[{role:"user",content:`"${article.title}"\n${article.description}\nSource: ${article.source}`}]
+      })
+    });
+    const d=await res.json();
+    if(d.error)throw new Error(d.error.message);
+    setState({aiSummary:d.content?.[0]?.text||"No response.",aiLoading:false});
+  }catch(e){setState({aiSummary:"⚠ "+e.message,aiLoading:false});}
+}
+
+const I={
+  search:`<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>`,
+  x:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`,
+  bk:`<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>`,
+  bkOn:`<svg width="19" height="19" viewBox="0 0 24 24" fill="#63B3ED" stroke="#63B3ED" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>`,
+  home:`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`,
+  saved:`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>`,
+  brain:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg>`,
+  back:`<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>`,
+  link:`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`,
+  refresh:`<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`,
+  star:`<svg width="11" height="11" viewBox="0 0 24 24" fill="#F6AD55"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 17 5.8 21.3l2.4-7.4L2 9.4h7.6z"/></svg>`,
+};
+
+function shimmer(){
+  const s=`background:linear-gradient(90deg,rgba(255,255,255,.04) 0%,rgba(255,255,255,.08) 50%,rgba(255,255,255,.04) 100%);background-size:600px 100%;animation:shimmer 1.4s infinite;border-radius:8px;`;
+  return `<div style="margin:0 14px 14px;height:195px;border-radius:20px;${s}"></div>`
+    +[0,1,2,3,4].map(()=>`<div style="display:flex;gap:12px;padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.05)">
+      <div style="width:86px;height:86px;border-radius:11px;flex-shrink:0;${s}"></div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:9px;padding-top:4px">
+        <div style="height:10px;width:38%;${s}"></div><div style="height:13px;${s}"></div>
+        <div style="height:13px;width:82%;${s}"></div><div style="height:13px;width:60%;${s}"></div>
+      </div></div>`).join("");
+}
+
+function enc(a){return encodeURIComponent(JSON.stringify(a));}
+
+function featuredCard(a){
+  const on=state.bookmarks.some(b=>b.id===a.id);
+  return `<div onclick="openA('${enc(a)}')" style="margin:0 14px;border-radius:20px;overflow:hidden;cursor:pointer;position:relative;height:195px;background:#1A2332;transition:transform .2s">
+    ${a.imageUrl?`<img src="${a.imageUrl}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:""}
+    <div style="position:absolute;inset:0;background:linear-gradient(135deg,rgba(6,10,15,.1) 0%,rgba(6,10,15,.92) 55%)"></div>
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:14px 16px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+        <span style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#63B3ED;text-transform:uppercase">${a.source}</span>
+        <span style="font-size:10px;color:rgba(255,255,255,.4)">${relTime(a.publishedAt)}</span>
+      </div>
+      <p style="font-size:16px;font-weight:800;line-height:1.3;color:#fff;margin:0;font-family:'Playfair Display',Georgia,serif;text-shadow:0 1px 10px rgba(0,0,0,.9);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">${a.title}</p>
+    </div>
+    <button onclick="event.stopPropagation();toggleBk('${enc(a)}')" style="position:absolute;top:11px;right:11px;background:rgba(0,0,0,.45);border:none;border-radius:10px;padding:7px;display:flex;color:${on?"#63B3ED":"#fff"}">${on?I.bkOn:I.bk}</button>
+  </div>`;
+}
+
+function articleCard(a,idx){
+  const on=state.bookmarks.some(b=>b.id===a.id);
+  const hot=a.rel>0;
+  return `<div onclick="openA('${enc(a)}')" class="fu" style="display:flex;gap:12px;padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;position:relative;animation-delay:${idx*.04}s">
+    ${hot?`<div style="position:absolute;top:13px;left:0;width:3px;height:calc(100% - 26px);background:linear-gradient(to bottom,#4299E1,#63B3ED);border-radius:0 2px 2px 0"></div>`:""}
+    <div style="width:86px;height:86px;flex-shrink:0;border-radius:11px;overflow:hidden;background:#1A2332">
+      ${a.imageUrl?`<img src="${a.imageUrl}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:""}
+    </div>
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:space-between">
+      <div>
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
+          <span style="font-size:10px;font-weight:700;letter-spacing:1.3px;color:#63B3ED;text-transform:uppercase">${a.source}</span>
+          ${hot?`<span style="font-size:10px;color:#F6AD55;display:flex;align-items:center;gap:3px">${I.star} For you</span>`:""}
+        </div>
+        <p style="font-size:13.5px;font-weight:600;line-height:1.42;color:#E8EEF4;margin:0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;font-family:'Playfair Display',Georgia,serif">${a.title}</p>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:7px">
+        <span style="font-size:11px;color:rgba(255,255,255,.28)">${relTime(a.publishedAt)}</span>
+        <button onclick="event.stopPropagation();toggleBk('${enc(a)}')" style="background:none;border:none;padding:4px;color:${on?"#63B3ED":"rgba(255,255,255,.3)"};display:flex">${on?I.bkOn:I.bk}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function feedView(){
+  const {articles,loading,error,category,query}=state;
+  const n=articles.filter(a=>a.rel>0).length;
+  return `
+  <div style="padding:10px 14px 0;flex-shrink:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+      <div>
+        <div style="font-size:30px;font-weight:800;color:#F0F4F8;font-family:'Playfair Display',Georgia,serif;letter-spacing:-.5px">Pulse</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.38);margin-top:2px">${n>0?n+" stories tailored for you":"Real news, right now"}</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="fetchNews(state.category,state.query)" style="background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:7px 9px;color:rgba(255,255,255,.5);display:flex;align-items:center">${I.refresh}</button>
+        <button onclick="setState({view:'profile'})" style="display:flex;align-items:center;gap:6px;background:rgba(99,179,237,.1);border:1px solid rgba(99,179,237,.2);border-radius:11px;padding:7px 12px;color:#63B3ED;font-size:12px;font-weight:600">${I.brain} Profile</button>
+      </div>
+    </div>
+    <div style="position:relative;margin-bottom:10px">
+      <div style="position:absolute;left:13px;top:50%;transform:translateY(-50%);color:rgba(255,255,255,.3);pointer-events:none">${I.search}</div>
+      <input id="si" value="${query}" oninput="handleQ(this.value)" placeholder="Search real news…"
+        style="width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:13px;padding:10px 38px 10px 40px;font-size:14px;color:#E8EEF4;outline:none"
+        onfocus="this.style.borderColor='rgba(99,179,237,.35)'" onblur="this.style.borderColor='rgba(255,255,255,.08)'"/>
+      ${query?`<button onclick="clearQ()" style="position:absolute;right:9px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.08);border:none;border-radius:6px;padding:4px;color:rgba(255,255,255,.5);display:flex">${I.x}</button>`:""}
+    </div>
+    ${!query?`<div style="display:flex;gap:7px;overflow-x:auto;padding-bottom:10px">
+      ${CATEGORIES.map(c=>`<button onclick="setcat('${c}')" style="flex-shrink:0;padding:7px 15px;border-radius:20px;font-size:12.5px;font-weight:600;background:${category===c?"#63B3ED":"rgba(255,255,255,.055)"};border:1px solid ${category===c?"#63B3ED":"rgba(255,255,255,.07)"};color:${category===c?"#060A0F":"rgba(255,255,255,.55)"}">${c}</button>`).join("")}
+    </div>`:""}
+  </div>
+  <div style="overflow-y:auto;flex:1">
+    ${loading?shimmer():error?`
+      <div style="text-align:center;padding:60px 24px">
+        <div style="font-size:44px;margin-bottom:14px">⚠️</div>
+        <p style="font-size:14px;color:#FC8181;margin-bottom:20px;line-height:1.6">${error}</p>
+        <button onclick="fetchNews(state.category,state.query)" style="background:rgba(99,179,237,.12);border:1px solid rgba(99,179,237,.25);color:#63B3ED;border-radius:10px;padding:10px 20px;font-size:13px;font-weight:600">Try Again</button>
+      </div>`:articles.length===0?`
+      <div style="text-align:center;padding:70px 24px;color:rgba(255,255,255,.35)"><div style="font-size:44px;margin-bottom:12px">🔍</div><p>No articles found</p></div>`:
+      `${!query&&articles[0]?`
+        <div style="padding:4px 14px 8px"><span style="font-size:10px;font-weight:700;letter-spacing:1.6px;color:rgba(255,255,255,.28);text-transform:uppercase">Top Story</span></div>
+        <div style="margin-bottom:14px">${featuredCard(articles[0])}</div>
+        ${articles.length>1?`<div style="padding:0 14px 8px"><span style="font-size:10px;font-weight:700;letter-spacing:1.6px;color:rgba(255,255,255,.28);text-transform:uppercase">Latest</span></div>`:""}
+      `:""}
+      ${(query?articles:articles.slice(1)).map((a,i)=>articleCard(a,i)).join("")}
+      <div style="height:20px"></div>`}
+  </div>`;
+}
+
+function detailView(){
+  const a=state.detail; if(!a)return"";
+  const on=state.bookmarks.some(b=>b.id===a.id);
+  const hot=Object.entries(state.prefs).sort((x,y)=>y[1]-x[1]).find(([t])=>(a.title+" "+(a.description||"")).toLowerCase().includes(t));
+  return `<div style="height:100%;overflow-y:auto">
+    <div style="position:relative;height:230px;background:#1A2332;flex-shrink:0">
+      ${a.imageUrl?`<img src="${a.imageUrl}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'">`:""}
+      <div style="position:absolute;inset:0;background:linear-gradient(to bottom,rgba(6,10,15,.2) 0%,rgba(6,10,15,.96) 100%)"></div>
+      <button onclick="setState({view:'feed',aiSummary:'',aiLoading:false,aiKeyPrompt:false})" style="position:absolute;top:16px;left:16px;background:rgba(0,0,0,.5);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:8px 14px;color:#fff;display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600">${I.back} Back</button>
+      <button onclick="toggleBk('${enc(a)}')" style="position:absolute;top:16px;right:16px;background:${on?"rgba(99,179,237,.2)":"rgba(0,0,0,.5)"};border:1px solid ${on?"rgba(99,179,237,.5)":"rgba(255,255,255,.15)"};border-radius:12px;padding:8px 10px;display:flex">${on?I.bkOn:I.bk}</button>
+    </div>
+    <div style="padding:18px 18px 100px">
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:10px;font-weight:700;letter-spacing:1.6px;color:#63B3ED;text-transform:uppercase">${a.source}</span>
+        <span style="color:rgba(255,255,255,.3)">·</span>
+        <span style="font-size:11px;color:rgba(255,255,255,.35)">${relTime(a.publishedAt)}</span>
+        ${hot?`<span style="font-size:10px;color:#F6AD55;background:rgba(246,173,85,.1);border:1px solid rgba(246,173,85,.2);border-radius:6px;padding:2px 8px;display:flex;align-items:center;gap:4px">${I.star} In your interests</span>`:""}
+      </div>
+      <h1 style="font-size:21px;font-weight:800;line-height:1.32;color:#F0F4F8;margin-bottom:14px;font-family:'Playfair Display',Georgia,serif">${a.title}</h1>
+      ${a.description?`<p style="font-size:14px;line-height:1.75;color:rgba(240,244,248,.65);margin-bottom:22px">${a.description}</p>`:""}
+      <div style="background:rgba(99,179,237,.05);border:1px solid rgba(99,179,237,.14);border-radius:16px;padding:18px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:${state.aiSummary||state.aiLoading||state.aiKeyPrompt?13:0}px">
+          <div style="display:flex;align-items:center;gap:7px;color:#63B3ED">${I.brain}<span style="font-size:11px;font-weight:700;letter-spacing:.8px">AI ANALYSIS</span></div>
+          ${!state.aiSummary&&!state.aiLoading&&!state.aiKeyPrompt?`<button onclick="handleAI()" style="font-size:12px;font-weight:600;color:#63B3ED;background:rgba(99,179,237,.12);border:1px solid rgba(99,179,237,.25);border-radius:8px;padding:5px 12px">Generate</button>`:""}
+        </div>
+        ${state.aiKeyPrompt?`<p style="font-size:12px;color:rgba(255,255,255,.45);margin-bottom:9px;line-height:1.5">Enter Anthropic API key for AI summaries:</p>
+          <div style="display:flex;gap:8px"><input id="aki" type="password" placeholder="sk-ant-…" style="flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:9px 12px;color:#fff;font-size:13px;outline:none"/>
+          <button onclick="saveAK()" style="background:#63B3ED;color:#060A0F;border:none;border-radius:8px;padding:9px 14px;font-weight:700;font-size:13px">Go</button></div>
+          <a href="https://console.anthropic.com" target="_blank" style="display:block;margin-top:8px;font-size:11px;color:rgba(99,179,237,.6)">console.anthropic.com →</a>`:""}
+        ${state.aiLoading?`<div style="display:flex;gap:7px;align-items:center">${[0,1,2].map(i=>`<div style="width:6px;height:6px;border-radius:50%;background:#63B3ED;animation:pulse 1.2s ${i*.2}s infinite"></div>`).join("")}<span style="font-size:12px;color:rgba(255,255,255,.4);margin-left:4px">Analyzing…</span></div>`:""}
+        ${state.aiSummary?`<div style="font-size:13px;line-height:1.85;color:rgba(240,244,248,.75);white-space:pre-line">${state.aiSummary}</div>`:""}
+      </div>
+      <a href="${a.url}" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:14px 0;background:rgba(99,179,237,.1);border:1px solid rgba(99,179,237,.22);border-radius:13px;color:#63B3ED;font-size:14px;font-weight:600;margin-bottom:10px">${I.link} Read Full Article on ${a.source}</a>
+      <p style="font-size:11px;color:rgba(255,255,255,.2);text-align:center">Opens the original verified source</p>
+    </div>
+  </div>`;
+}
+
+function profileView(){
+  const s=Object.entries(state.prefs).sort((a,b)=>b[1]-a[1]).slice(0,15);
+  const m=s[0]?.[1]||1;
+  return `<div style="padding:20px 18px 100px;overflow-y:auto;flex:1">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:22px">
+      <div><h2 style="font-size:22px;font-weight:800;color:#F0F4F8;font-family:'Playfair Display',Georgia,serif">Taste Profile</h2>
+      <p style="font-size:12px;color:rgba(255,255,255,.4);margin-top:3px">Built from your reading habits</p></div>
+      ${s.length?`<button onclick="resetP()" style="font-size:12px;color:#FC8181;background:rgba(252,129,129,.08);border:1px solid rgba(252,129,129,.2);border-radius:10px;padding:6px 13px;font-weight:600">Reset</button>`:""}
+    </div>
+    ${s.length===0?`<div style="text-align:center;padding:50px 0;color:rgba(255,255,255,.3)"><div style="font-size:48px;margin-bottom:14px">🧠</div><p>Read articles to build your profile</p></div>`
+    :s.map(([t,v])=>`<div style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:13px;color:#E8EEF4;font-weight:500">#${t}</span><span style="font-size:12px;color:#63B3ED;font-weight:700">${v} pts</span></div>
+      <div style="height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden"><div style="height:100%;width:${(v/m)*100}%;background:linear-gradient(to right,#4299E1,#63B3ED);border-radius:2px"></div></div>
+    </div>`).join("")}
+  </div>`;
+}
+
+function savedView(){
+  const b=state.bookmarks;
+  return `<div style="padding:20px 0 100px;overflow-y:auto;flex:1">
+    <div style="padding:0 14px 18px">
+      <h2 style="font-size:22px;font-weight:800;color:#F0F4F8;font-family:'Playfair Display',Georgia,serif">Saved</h2>
+      <p style="font-size:12px;color:rgba(255,255,255,.4);margin-top:3px">${b.length} article${b.length!==1?"s":""}</p>
+    </div>
+    ${b.length===0?`<div style="text-align:center;padding:70px 20px;color:rgba(255,255,255,.3)"><div style="font-size:48px;margin-bottom:14px">🔖</div><p>Bookmark articles to save them here</p></div>`
+    :b.map((a,i)=>articleCard(a,i)).join("")}
+  </div>`;
+}
+
+function nav(){
+  const {view,bookmarks}=state;
+  return `<div style="flex-shrink:0;border-top:1px solid rgba(255,255,255,.06);background:rgba(6,10,15,.97);display:flex">
+    ${[{id:"feed",l:"Feed",ic:I.home},{id:"saved",l:"Saved",ic:I.saved}].map(t=>{
+      const on=view===t.id;
+      return `<button onclick="setState({view:'${t.id}'})" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:11px 0 ${window.innerHeight>700?18:12}px;background:none;border:none;font-size:11px;font-weight:600;color:${on?"#63B3ED":"rgba(255,255,255,.38)"};position:relative">
+        <span style="color:${on?"#63B3ED":"rgba(255,255,255,.4)"}">${t.ic}</span>${t.l}
+        ${t.id==="saved"&&bookmarks.length>0?`<span style="position:absolute;top:8px;left:calc(50% + 7px);background:#63B3ED;color:#060A0F;font-size:9px;font-weight:800;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center">${bookmarks.length}</span>`:""}
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function render(){
+  const {view}=state;
+  const shell=`width:100%;max-width:420px;height:100dvh;margin:0 auto;background:#060A0F;display:flex;flex-direction:column;overflow:hidden`;
+  let inner;
+  if(view==="detail"){
+    inner=`<div style="flex:1;min-height:0">${detailView()}</div>`;
+  } else {
+    const body=view==="profile"?profileView():view==="saved"?savedView():feedView();
+    inner=`<div style="display:flex;flex-direction:column;flex:1;min-height:0">${body}${nav()}</div>`;
+  }
+  document.getElementById("app").innerHTML=`<div style="${shell}">${inner}</div>`;
+}
+
+// Actions
+let qt;
+function handleQ(v){clearTimeout(qt);qt=setTimeout(()=>{state.query=v;fetchNews(state.category,v);},600);}
+function clearQ(){state.query="";const el=document.getElementById("si");if(el)el.value="";fetchNews(state.category,"");}
+function setcat(c){state.category=c;fetchNews(c,state.query||"");}
+function openA(e){
+  const a=JSON.parse(decodeURIComponent(e));
+  const kw=extractKw(a);const p={...state.prefs};
+  kw.forEach(k=>{p[k]=(p[k]||0)+10;});
+  store.set("prefs",p);
+  setState({view:"detail",detail:a,prefs:p,aiSummary:"",aiLoading:false,aiKeyPrompt:false});
+}
+function toggleBk(e){
+  const a=JSON.parse(decodeURIComponent(e));
+  const ex=state.bookmarks.some(b=>b.id===a.id);
+  const bk=ex?state.bookmarks.filter(b=>b.id!==a.id):[a,...state.bookmarks];
+  store.set("bk",bk);setState({bookmarks:bk});
+}
+function handleAI(){if(!state.antKey){setState({aiKeyPrompt:true});return;}runAI(state.antKey,state.detail);}
+function saveAK(){const k=document.getElementById("aki").value.trim();if(!k)return;store.set("ak",k);setState({antKey:k,aiKeyPrompt:false});runAI(k,state.detail);}
+function resetP(){store.set("prefs",{});setState({prefs:{}});}
+
+window.fetchNews=fetchNews;window.setState=setState;window.state=state;
+window.openA=openA;window.toggleBk=toggleBk;window.handleAI=handleAI;
+window.saveAK=saveAK;window.resetP=resetP;window.handleQ=handleQ;
+window.clearQ=clearQ;window.setcat=setcat;
+
+render();
+fetchNews("Top Stories","");
+</script>
+</body>
+</html>
